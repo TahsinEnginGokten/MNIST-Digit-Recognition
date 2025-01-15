@@ -1,34 +1,40 @@
-from flask import Flask, request, jsonify, send_from_directory  # Added send_from_directory for static file serving
+from flask import Flask, request, jsonify, send_file
 import tensorflow as tf
 import numpy as np
 from PIL import Image
-import io
+from tensorflow.keras.datasets import mnist
+from config import DEFAULT_MODEL, ALLOWED_MODELS, add_allowed_model
 import os
-from tensorflow.keras.datasets import mnist  # Importing MNIST dataset
+import io
 
 app = Flask(__name__)
 
-# Load the trained model
-model = tf.keras.models.load_model("models/digit_recognition_model.h5")
+# Load the default model at startup
+if os.path.exists(DEFAULT_MODEL):
+    model = tf.keras.models.load_model(DEFAULT_MODEL)
+    add_allowed_model(DEFAULT_MODEL)  # Ensure the default model is allowed
+    print(f"Default model loaded: {DEFAULT_MODEL}")  # Debugging
+else:
+    raise FileNotFoundError(f"Default model not found at {DEFAULT_MODEL}")
 
-# Directory to save MNIST sample images
-SAMPLE_DIR = "mnist_samples"
-os.makedirs(SAMPLE_DIR, exist_ok=True)
-
-def generate_sample_images():
+@app.route("/load_model/<model_name>", methods=["POST"])
+def load_model_endpoint(model_name):
     """
-    Generate 10 sample images from the MNIST dataset and save them to a directory.
+    Dynamically load a specified model by its name.
     """
-    (x_train, y_train), (x_test, y_test) = mnist.load_data()
+    global model
+    try:
+        model_path = f"models/{model_name}.h5"
+        print(f"Requested model path: {model_path}")  # Debugging
+        print(f"Allowed Models: {ALLOWED_MODELS}")   # Debugging
 
-    for i in range(10):
-        image = Image.fromarray(x_test[i])  # Convert the NumPy array to a PIL image
-        label = y_test[i]  # Get the corresponding label
-        image_path = os.path.join(SAMPLE_DIR, f"mnist_digit_{i}_label_{label}.png")
-        image.save(image_path)
-
-# Generate sample images on startup
-generate_sample_images()
+        if model_path in ALLOWED_MODELS and os.path.exists(model_path):
+            model = tf.keras.models.load_model(model_path)
+            return jsonify({"status": f"Model {model_name} loaded successfully."})
+        else:
+            return jsonify({"error": "Model not allowed or does not exist."}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
 
 @app.route("/predict", methods=["POST"])
 def predict():
@@ -36,82 +42,74 @@ def predict():
     Predict the digit in an uploaded image using the trained model.
     """
     try:
-        # Get the file from the request
         file = request.files.get("file")
+        if not file:
+            return jsonify({"error": "No file uploaded."}), 400
 
-        # Ensure the file is provided and is an image
-        if not file or not file.filename.lower().endswith(('.png', '.jpg', '.jpeg')):
-            return jsonify({"error": "Invalid file format. Please upload a .png, .jpg, or .jpeg image."}), 400
+        try:
+            image = Image.open(io.BytesIO(file.read())).convert("L").resize((28, 28))
+            image_array = np.array(image) / 255.0
+            image_array = image_array.reshape(1, 28 * 28)
+        except Exception:
+            return jsonify({"error": "Invalid image file. Ensure it's a valid .png, .jpg, or .jpeg image."}), 400
 
-        # Open the image and preprocess
-        image = Image.open(io.BytesIO(file.read())).convert("L").resize((28, 28))
-        image_array = np.array(image) / 255.0
-        image_array = image_array.reshape(1, 28 * 28)
-
-        # Make prediction
         prediction = model.predict(image_array)
         predicted_digit = np.argmax(prediction)
-
-        # Return the result
-        return jsonify({"digit": int(predicted_digit)})
+        confidence = prediction[0][predicted_digit] * 100  # Convert to percentage
+        return jsonify({"digit": int(predicted_digit), "confidence": f"{confidence:.2f}%"})  # Format as percentage
 
     except Exception as e:
-        # Handle unexpected errors
         return jsonify({"error": str(e)}), 500
-    
 
-@app.route("/predict_sample", methods=["GET"])
-def predict_sample():
+@app.route("/healthcheck", methods=["GET"])
+def healthcheck():
     """
-    Predict the digit for a predefined sample image from the MNIST dataset.
+    Healthcheck endpoint to ensure the API is running.
+    """
+    return jsonify({"status": "API is running."})
+
+@app.route("/mnist_sample/<int:index>", methods=["GET"])
+def get_sample_image(index):
+    """
+    Serve an MNIST sample image dynamically by index.
     """
     try:
-        # Load the MNIST dataset
         (x_train, y_train), (x_test, y_test) = mnist.load_data()
+        if index < 0 or index >= len(x_test):
+            return jsonify({"error": "Invalid index. Choose a value between 0 and 9999."}), 400
 
-        # Select a sample image (for example, the 0th image from the test set)
-        sample_image = x_test[0]
+        sample_image = Image.fromarray(x_test[index])
+        buf = io.BytesIO()
+        sample_image.save(buf, format="PNG")
+        buf.seek(0)
+        return send_file(buf, mimetype="image/png")
 
-        # Preprocess the image (resize, normalize, reshape)
-        image_array = sample_image / 255.0
-        image_array = image_array.reshape(1, 28 * 28)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
-        # Predict the digit
-        prediction = model.predict(image_array)
+@app.route("/predict_sample/<int:index>", methods=["GET"])
+def predict_sample(index):
+    """
+    Predict the digit for an MNIST sample image by index.
+    """
+    try:
+        (x_train, y_train), (x_test, y_test) = mnist.load_data()
+        if index < 0 or index >= len(x_test):
+            return jsonify({"error": "Invalid index. Choose a value between 0 and 9999."}), 400
+
+        sample_image = x_test[index] / 255.0
+        sample_image = sample_image.reshape(1, 28 * 28)
+
+        prediction = model.predict(sample_image)
         predicted_digit = np.argmax(prediction)
-
-        # Return the result
-        return jsonify({"digit": int(predicted_digit)})
-
-    except Exception as e:
-        # Handle unexpected errors
-        return jsonify({"error": str(e)}), 500
+        confidence = prediction[0][predicted_digit] * 100  # Convert to percentage
+        return jsonify({"digit": int(predicted_digit), "confidence": f"{confidence:.2f}%"})  # Format as percentage
 
 
-@app.route("/get_samples", methods=["GET"])
-def get_samples():
-    """
-    Get a list of all generated MNIST sample images.
-    """
-    try:
-        # List all images in the sample directory
-        samples = os.listdir(SAMPLE_DIR)
-        sample_urls = [f"http://127.0.0.1:5000/mnist_samples/{sample}" for sample in samples]
-        return jsonify({"sample_urls": sample_urls})  # Return accessible URLs
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
-
-@app.route("/mnist_samples/<filename>", methods=["GET"])
-def serve_sample_file(filename):
-    """
-    Serve a specific MNIST sample image file.
-    """
-    try:
-        return send_from_directory(SAMPLE_DIR, filename)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 404
-
 
 if __name__ == "__main__":
+    # Run the app (debug mode should only be used during development)
+    print(f"Allowed Models at Startup: {ALLOWED_MODELS}")  # Debugging
     app.run(debug=True)

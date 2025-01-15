@@ -7,7 +7,23 @@ __pycache__/
 
 # Ignore system files
 .DS_Store
+Thumbs.db
 
 # Ignore large binary files
 *.dylib
 *.h5
+
+# MLflow logs
+mlruns/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Temporary files
+*.log
+*.tmp
+*.bak
+
+# Ignore models directory but allow versioned files
+models/
+!models/*.h5
